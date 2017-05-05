@@ -3,6 +3,8 @@
 
 # dash-shaka-playback
 
+[![Greenkeeper badge](https://badges.greenkeeper.io/clappr/dash-shaka-playback.svg)](https://greenkeeper.io/)
+
 A [clappr](https://github.com/clappr/clappr) playback to play dash based on [shaka-player](https://github.com/google/shaka-player).
 
 > CDNJS: https://cdnjs.cloudflare.com/ajax/libs/dash-shaka-playback/2.0.5/dash-shaka-playback.js

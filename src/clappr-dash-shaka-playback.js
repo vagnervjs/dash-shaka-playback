@@ -11,11 +11,11 @@ class DashShakaPlayback extends HTML5Video {
     }
   }
 
-  static canPlay (resource, mimeType = '') {
+  static canPlay (resource, mimeType = '', isEncrypted, isOffline) {
     shaka.polyfill.installAll()
     let browserSupported = shaka.Player.isBrowserSupported()
     let resourceParts = resource.split('?')[0].match(/.*\.(.*)$/) || []
-    return browserSupported && ((resourceParts[1] === 'mpd') || mimeType.indexOf('application/dash+xml') > -1)
+    return browserSupported && ((resourceParts[1] === 'mpd') || mimeType.indexOf('application/dash+xml') > -1 || isOffline)
   }
 
   get name () {
@@ -59,6 +59,15 @@ class DashShakaPlayback extends HTML5Video {
     this._levels = []
     this._pendingAdaptationEvent = false
     this._isShakaReadyState = false
+
+    if (!navigator.onLine) {
+      this._setup(false)
+      this.isAvailableOffline()
+        .then(content => {
+          if (content) this._load(content.offlineUri)
+          else this.trigger(Events.PLAYBACK_ERROR, {type: 'offline'}, this.name)
+        })
+    }
 
     options.autoPlay && this.play()
   }
@@ -124,6 +133,10 @@ class DashShakaPlayback extends HTML5Video {
     }
   }
 
+  setMetadata(data) {
+    this.metadata = data
+  }
+
   get textTracks () {
     return this.isReady && this._player.getTextTracks()
   }
@@ -142,16 +155,16 @@ class DashShakaPlayback extends HTML5Video {
 
   selectTrack (track) {
     if (track.type === 'text') {
-        this._player.selectTextTrack(track)
+      this._player.selectTextTrack(track)
     } else if (track.type === 'variant') {
-        this._player.selectVariantTrack(track)
-        if (track.mimeType.startsWith('video/')) {
-            // we trigger the adaptation event here
-            // because Shaka doesn't trigger its event on "manual" selection.
-            this._onAdaptation()
-        }
+      this._player.selectVariantTrack(track)
+      if (track.mimeType.startsWith('video/')) {
+        // we trigger the adaptation event here
+        // because Shaka doesn't trigger its event on "manual" selection.
+        this._onAdaptation()
+      }
     } else {
-        throw new Error('Unhandled track type:', track.type);
+      throw new Error('Unhandled track type:', track.type);
     }
   }
 
@@ -254,16 +267,21 @@ class DashShakaPlayback extends HTML5Video {
     }
   }
 
-  _setup () {
+  _setup (shouldLoad = true) {
     this._isShakaReadyState = false
     this._ccIsSetup = false
     this._player = this._createPlayer()
     this._options.shakaConfiguration && this._player.configure(this._options.shakaConfiguration)
     this._options.shakaOnBeforeLoad && this._options.shakaOnBeforeLoad(this._player)
+    shouldLoad && this._load()
+  }
 
-    let playerLoaded = this._player.load(this._options.src)
+  _load (src) {
+    if (!navigator.onLine && !src) return
+    let playerLoaded = this._player.load(src || this._options.src)
+
     playerLoaded.then(() => this._loaded())
-      .catch((e) => this._setupError(e))
+      .catch((error) => this._setupError(error))
   }
 
   _createPlayer () {
@@ -271,7 +289,71 @@ class DashShakaPlayback extends HTML5Video {
     player.addEventListener('error', this._onError.bind(this))
     player.addEventListener('adaptation', this._onAdaptation.bind(this))
     player.addEventListener('buffering', this._onBuffering.bind(this))
+
+    this.initStorage(player);
+
     return player
+  }
+
+  initStorage(player) {
+    this.storage = new shaka.offline.Storage(player);
+    this.storage.configure({
+      progressCallback: (content, progress) => this.onDowloadProgress(content, progress),
+      trackSelectionCallback: this.selectTracks
+    });
+  }
+
+  onDowloadProgress(content, progress) {
+    typeof this.progressCallback === 'function' && this.progressCallback(progress, content)
+  }
+
+  selectTracks(tracks) {
+    // Store the highest bandwidth variant.
+    var found = tracks
+      .filter(function(track) { return track.type == 'variant'; })
+      .sort(function(a, b) { return a.bandwidth > b.bandwidth; })
+      .pop();
+    console.log('Player selectTracks', found)
+    return [ found ];
+  }
+
+  download(progressCallback) {
+    if (!this._player) this._setup(false)
+    const metadata = {
+      'title': this.metadata.title,
+      'id': this.metadata.id,
+      'downloaded': Date()
+    }
+    console.log('Player download starting', this.metadata.selectedResource.url, metadata)
+    this.progressCallback = progressCallback
+    return this.storage.store(this.metadata.selectedResource.url, metadata);
+  }
+
+  listContent() {
+    if (!this._player) this._setup(false)
+    return this.storage.list()
+  }
+
+  isAvailableOffline() {
+    return new Promise((resolve) => {
+      this.listContent().then((list) => {
+        const offlineContent = list.find(l => l.appMetadata.id == this.options.sources[0])
+        resolve(offlineContent)
+      })
+    })
+  }
+
+  remove() {
+    return new Promise((resolve, reject) => {
+      this.isAvailableOffline()
+        .then((content) => {
+          if (content) {
+            this.storage.remove(content)
+              .then(resolve)
+              .catch(reject)
+          } else reject()
+        })
+    })
   }
 
   _onBuffering (e) {
@@ -309,7 +391,7 @@ class DashShakaPlayback extends HTML5Video {
 
   _onError (err) {
     Log.error('Shaka error event:', err)
-    this.trigger(Events.PLAYBACK_ERROR, err, this.name)
+    // this.trigger(Events.PLAYBACK_ERROR, err, this.name)
   }
 
   _onAdaptation () {
